@@ -361,9 +361,21 @@ jobs:
           set -euo pipefail
           APP="$ROOT/xstudio/build/xSTUDIO.app"
           test -d "$APP" || { echo "xSTUDIO.app not found"; exit 1; }
-          # Ad hoc signature: no Developer ID, but arm64 binaries must carry
-          # a valid signature to launch at all.
-          codesign --force --deep --sign - "$APP"
+          # Ad hoc signature: no Developer ID, but every arm64 binary must
+          # carry a valid signature to load at all. Sign each Mach-O file
+          # individually: 'codesign --deep' mistakes QML module folders with
+          # dotted names (e.g. qml/SessionSnapshots.1) for bundles and fails.
+          n=0
+          while IFS= read -r -d '' f; do
+            if file -b "$f" | grep -q 'Mach-O'; then
+              codesign --force --sign - "$f"
+              n=$((n+1))
+            fi
+          done < <(find "$APP" -type f -print0)
+          echo "Ad hoc signed $n Mach-O files"
+          # Sealing the bundle as a whole is nice to have, not required to run.
+          codesign --force --sign - "$APP" \
+            || echo "::warning::Could not seal the app bundle; its binaries are still individually signed."
           SAFE_REF=$(echo "$XSTUDIO_REF" | sed 's/[^A-Za-z0-9._-]/_/g')
           STAGE="$RUNNER_TEMP/dmg"
           mkdir -p "$STAGE" dist
