@@ -56,7 +56,7 @@ Read this before making builds public. This is not legal advice.
 
 **Patents are a separate question.** H.264, HEVC and AAC are covered by patent pools, and ProRes is Apple's. Building these codecs is fine; distributing binaries that contain them may need licences, depending on who receives them and where.
 
-**The `ffmpeg_extra_features` input** adds vcpkg FFmpeg features on top of upstream, e.g. `nonfree,fdk-aac`. **`nonfree` makes the FFmpeg binaries legally non-redistributable.** Builds with it should stay in a private repo and must not go into public releases.
+**The `ffmpeg_extra_features` input** adds vcpkg FFmpeg features on top of upstream, e.g. `nonfree,fdk-aac`. **`nonfree` makes the FFmpeg binaries legally non-redistributable.** Builds with it should stay in a private repo and must not go into public releases. The workflow enforces this: in a public repo, a `licence-check` job fails the run if you ask for `nonfree`, `all-nonfree` or `fdk-aac`. To make such builds, use a private copy of this repo.
 
 **Visibility.** On a public repo, run artifacts and releases can be downloaded by anyone, which counts as distribution. A private repo keeps builds to you and your collaborators. Private repos use your Actions minutes, and macOS minutes are billed at a multiplier.
 

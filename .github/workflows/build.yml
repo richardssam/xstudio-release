@@ -57,7 +57,24 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # Anything built in a public repo is downloadable by anyone, and FFmpeg
+  # built with 'nonfree' may not be redistributed. Refuse that combination.
+  licence-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse nonfree FFmpeg in a public repo
+        env:
+          IS_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          if [ "$IS_PRIVATE" != "true" ] && echo ",$FFMPEG_EXTRA_FEATURES," | tr -d ' ' | grep -qiE ',(nonfree|all-nonfree|fdk-aac),'; then
+            echo "::error::ffmpeg_extra_features='$FFMPEG_EXTRA_FEATURES' produces non-redistributable FFmpeg binaries. Run this from a private copy of the repo instead."
+            exit 1
+          fi
+          echo "OK: repo private=$IS_PRIVATE, extra FFmpeg features='${FFMPEG_EXTRA_FEATURES:-none}'"
+
+  # ---------------------------------------------------------------------------
   windows:
+    needs: licence-check
     if: github.event_name == 'push' || inputs.build_windows
     # Pinned rather than windows-latest: xSTUDIO's guide targets VS 2022 and
     # Qt 6.5.3 msvc2019_64, and an image change invalidates the vcpkg cache.
@@ -203,6 +220,7 @@ jobs:
 
   # ---------------------------------------------------------------------------
   macos:
+    needs: licence-check
     if: github.event_name == 'push' || inputs.build_macos
     runs-on: macos-15   # Apple Silicon
     timeout-minutes: 360
