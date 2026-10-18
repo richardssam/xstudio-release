@@ -1,5 +1,5 @@
 # GitHub evicts an Actions cache entry that hasn't been restored for 7 days.
-# This weekly job restores the latest vcpkg binary cache for each platform,
+# This weekly job restores the latest release-only vcpkg binary cache for each platform,
 # which resets that clock, so the next real build doesn't start cold.
 #
 # Cost: a few minutes per platform per week. On a private repo macOS minutes
@@ -25,7 +25,7 @@ jobs:
         with:
           path: C:\x\vcpkg-cache
           key: vcpkg-win-keepwarm-never-matches
-          restore-keys: vcpkg-win-
+          restore-keys: vcpkg-win-rel-
       - run: echo "Restored ${{ steps.cache.outputs.cache-matched-key || 'nothing (no cache yet)' }}"
 
   macos:
@@ -36,5 +36,5 @@ jobs:
         with:
           path: ~/x/vcpkg-cache
           key: vcpkg-mac-keepwarm-never-matches
-          restore-keys: vcpkg-mac-
+          restore-keys: vcpkg-mac-rel-
       - run: echo "Restored ${{ steps.cache.outputs.cache-matched-key || 'nothing (no cache yet)' }}"

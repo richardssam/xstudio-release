@@ -33,6 +33,15 @@ The workflow is built for this:
 
 After that, a build where dependencies haven't changed spends roughly 10–20 minutes on them (restore plus verify), then compiles xSTUDIO itself.
 
+## Release-only dependencies
+
+By default (`release_only_deps`, on), vcpkg builds dependencies in Release only, which roughly halves dependency time. The workflow adds `set(VCPKG_BUILD_TYPE release)` to the triplets it uses:
+
+- **Windows:** an overlay copy of the stock `x64-windows` triplet.
+- **macOS:** xSTUDIO's own `arm-osx` triplet, plus an overlay `arm64-osx` host triplet.
+
+The only xSTUDIO build this repo makes is Release, so nothing is lost. Untick the option to build dependencies exactly as upstream does, with both debug and release. Each setting keeps its own cache (`vcpkg-<os>-rel-…` or `vcpkg-<os>-full-…`).
+
 ## Caching
 
 The cache uses vcpkg's file provider stored in the GitHub Actions cache. Be aware of its limits:
@@ -85,5 +94,4 @@ Upstream's presets expect vcpkg in a folder next to the xSTUDIO checkout (`../vc
 ## Possible next steps
 
 - **Linux:** a Rocky 9 container job using the `LinuxNinjaRelease` preset.
-- **Faster cold builds:** a release-only vcpkg triplet (`VCPKG_BUILD_TYPE release`) skips debug builds of every dependency. It roughly halves dependency time, but differs from upstream's triplets, so test it first.
 - **Intel Macs:** a `macos-13` job with the `MacOSIntelNinjaRelease` preset and the `x64-osx` triplet.

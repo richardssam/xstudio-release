@@ -33,6 +33,10 @@ on:
           Extra vcpkg FFmpeg features, comma separated (e.g. "nonfree,fdk-aac").
           Leave empty to build exactly what upstream specifies.
         default: ""
+      release_only_deps:
+        description: Build vcpkg dependencies in Release only (skips debug builds, roughly halves dependency time)
+        type: boolean
+        default: true
       publish_release:
         description: Create a draft GitHub Release with the installers
         type: boolean
@@ -53,6 +57,10 @@ env:
   XSTUDIO_REF: ${{ inputs.xstudio_ref || github.ref_name }}
   FFMPEG_EXTRA_FEATURES: ${{ inputs.ffmpeg_extra_features || '' }}
   QT_VERSION: "6.5.3"
+  # Tag pushes have no inputs, so they take the default (release-only).
+  RELEASE_ONLY_DEPS: ${{ github.event_name == 'push' || inputs.release_only_deps }}
+  # Release-only and full dependency sets get separate caches.
+  DEPS_VARIANT: ${{ (github.event_name == 'push' || inputs.release_only_deps) && 'rel' || 'full' }}
   VCPKG_DISABLE_METRICS: "1"
 
 jobs:
@@ -106,6 +114,8 @@ jobs:
           python "$env:GITHUB_WORKSPACE\release\scripts\patch_ffmpeg_features.py" `
             "$env:ROOT\xstudio\vcpkg.json" "$env:FFMPEG_EXTRA_FEATURES"
           if ($LASTEXITCODE -ne 0) { exit 1 }
+          python "$env:GITHUB_WORKSPACE\release\scripts\fix_upstream.py" "$env:ROOT\xstudio"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
           $sha  = git -C "$env:ROOT\xstudio" rev-parse --short HEAD
           $base = (Get-Content "$env:ROOT\xstudio\vcpkg.json" -Raw | ConvertFrom-Json).'builtin-baseline'
           $hash = (Get-FileHash "$env:ROOT\xstudio\vcpkg.json").Hash.Substring(0,16)
@@ -143,15 +153,26 @@ jobs:
           & "$env:ROOT\vcpkg\bootstrap-vcpkg.bat" -disableMetrics
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
+      # xSTUDIO only ships a Release build, so debug copies of every
+      # dependency are wasted time. An overlay triplet with the stock name
+      # (x64-windows) plus VCPKG_BUILD_TYPE release skips them.
+      - name: Use release-only vcpkg triplet
+        if: env.RELEASE_ONLY_DEPS == 'true'
+        run: |
+          $t = "$env:ROOT\xstudio\cmake\vcpkg_triplets\x64-windows.cmake"
+          Copy-Item "$env:ROOT\vcpkg\triplets\x64-windows.cmake" $t
+          Add-Content $t "`nset(VCPKG_BUILD_TYPE release)"
+          Get-Content $t
+
       - name: Restore vcpkg binary cache
         uses: actions/cache/restore@v4
         with:
           path: C:\x\vcpkg-cache
-          key: vcpkg-win-${{ env.VCPKG_COMMIT }}-${{ env.MANIFEST_HASH }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: vcpkg-win-${{ env.DEPS_VARIANT }}-${{ env.VCPKG_COMMIT }}-${{ env.MANIFEST_HASH }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            vcpkg-win-${{ env.VCPKG_COMMIT }}-${{ env.MANIFEST_HASH }}-
-            vcpkg-win-${{ env.VCPKG_COMMIT }}-
-            vcpkg-win-
+            vcpkg-win-${{ env.DEPS_VARIANT }}-${{ env.VCPKG_COMMIT }}-${{ env.MANIFEST_HASH }}-
+            vcpkg-win-${{ env.DEPS_VARIANT }}-${{ env.VCPKG_COMMIT }}-
+            vcpkg-win-${{ env.DEPS_VARIANT }}-
 
       - name: Count cached packages
         run: |
@@ -186,13 +207,16 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: C:\x\vcpkg-cache
-          key: vcpkg-win-${{ env.VCPKG_COMMIT }}-${{ env.MANIFEST_HASH }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: vcpkg-win-${{ env.DEPS_VARIANT }}-${{ env.VCPKG_COMMIT }}-${{ env.MANIFEST_HASH }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Configure
         working-directory: C:\x\xstudio
         run: |
           $qt = "$env:ROOT\Qt\$env:QT_VERSION\msvc2019_64"
-          cmake --preset WinNinjaRelease "-DQt6_DIR=$qt\lib\cmake\Qt6"
+          # Pass the same overlay triplets that vcpkg install used, so the
+          # configure-time vcpkg run sees identical package ABIs and builds nothing.
+          cmake --preset WinNinjaRelease "-DQt6_DIR=$qt\lib\cmake\Qt6" `
+            "-DVCPKG_OVERLAY_TRIPLETS=$env:ROOT\xstudio\cmake\vcpkg_triplets"
           exit $LASTEXITCODE
 
       - name: Build installer
@@ -246,6 +270,7 @@ jobs:
           git -C "$ROOT/xstudio" checkout "$XSTUDIO_REF"
           python3 "$GITHUB_WORKSPACE/release/scripts/patch_ffmpeg_features.py" \
             "$ROOT/xstudio/vcpkg.json" "$FFMPEG_EXTRA_FEATURES"
+          python3 "$GITHUB_WORKSPACE/release/scripts/fix_upstream.py" "$ROOT/xstudio"
           echo "XSTUDIO_SHA=$(git -C "$ROOT/xstudio" rev-parse --short HEAD)" >> "$GITHUB_ENV"
           echo "VCPKG_COMMIT=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["builtin-baseline"])' "$ROOT/xstudio/vcpkg.json")" >> "$GITHUB_ENV"
           echo "MANIFEST_HASH=$(shasum -a 256 "$ROOT/xstudio/vcpkg.json" | cut -c1-16)" >> "$GITHUB_ENV"
@@ -269,15 +294,27 @@ jobs:
           git -C "$ROOT/vcpkg" checkout "$VCPKG_COMMIT"
           "$ROOT/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
 
+      # Release-only dependencies: append VCPKG_BUILD_TYPE to xSTUDIO's own
+      # arm-osx target triplet, and overlay the arm64-osx host triplet too.
+      - name: Use release-only vcpkg triplets
+        if: env.RELEASE_ONLY_DEPS == 'true'
+        run: |
+          set -euo pipefail
+          T="$ROOT/xstudio/cmake/vcpkg_triplets"
+          printf '\nset(VCPKG_BUILD_TYPE release)\n' >> "$T/arm-osx.cmake"
+          cp "$ROOT/vcpkg/triplets/arm64-osx.cmake" "$T/arm64-osx.cmake"
+          printf '\nset(VCPKG_BUILD_TYPE release)\n' >> "$T/arm64-osx.cmake"
+          tail -3 "$T/arm-osx.cmake" "$T/arm64-osx.cmake"
+
       - name: Restore vcpkg binary cache
         uses: actions/cache/restore@v4
         with:
           path: ~/x/vcpkg-cache
-          key: vcpkg-mac-${{ env.VCPKG_COMMIT }}-${{ env.MANIFEST_HASH }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: vcpkg-mac-${{ env.DEPS_VARIANT }}-${{ env.VCPKG_COMMIT }}-${{ env.MANIFEST_HASH }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            vcpkg-mac-${{ env.VCPKG_COMMIT }}-${{ env.MANIFEST_HASH }}-
-            vcpkg-mac-${{ env.VCPKG_COMMIT }}-
-            vcpkg-mac-
+            vcpkg-mac-${{ env.DEPS_VARIANT }}-${{ env.VCPKG_COMMIT }}-${{ env.MANIFEST_HASH }}-
+            vcpkg-mac-${{ env.DEPS_VARIANT }}-${{ env.VCPKG_COMMIT }}-
+            vcpkg-mac-${{ env.DEPS_VARIANT }}-
 
       - name: Count cached packages
         run: echo "CACHE_FILES_BEFORE=$(find "$ROOT/vcpkg-cache" -type f | wc -l | tr -d ' ')" >> "$GITHUB_ENV"
@@ -307,7 +344,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ~/x/vcpkg-cache
-          key: vcpkg-mac-${{ env.VCPKG_COMMIT }}-${{ env.MANIFEST_HASH }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: vcpkg-mac-${{ env.DEPS_VARIANT }}-${{ env.VCPKG_COMMIT }}-${{ env.MANIFEST_HASH }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Configure
         working-directory: ${{ env.ROOT }}/xstudio
