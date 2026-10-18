@@ -1,0 +1,362 @@
+# Builds xSTUDIO from the upstream AcademySoftwareFoundation repo for Windows
+# and macOS (Apple Silicon). This repo holds only build automation; xSTUDIO's
+# source is cloned at build time at the ref you choose.
+#
+# Triggers:
+#   - Manual: Actions tab -> "Build xSTUDIO" -> Run workflow (pick a ref).
+#   - Tag push: pushing tag vX.Y.Z here builds upstream tag vX.Y.Z and
+#     creates a draft GitHub Release with the installers attached.
+#
+# First run: vcpkg builds every dependency from source (FFmpeg, Python,
+# OpenImageIO, ...). That can approach GitHub's 6-hour job limit. The vcpkg
+# binary cache is saved even if the dependency step times out, so if a job
+# fails there, just re-run it and it resumes from where it stopped.
+
+name: Build xSTUDIO
+
+on:
+  workflow_dispatch:
+    inputs:
+      xstudio_ref:
+        description: Upstream xSTUDIO tag, branch or commit
+        default: v1.3.0
+      build_windows:
+        description: Build Windows (x64 NSIS installer)
+        type: boolean
+        default: true
+      build_macos:
+        description: Build macOS (arm64 DMG)
+        type: boolean
+        default: true
+      ffmpeg_extra_features:
+        description: >-
+          Extra vcpkg FFmpeg features, comma separated (e.g. "nonfree,fdk-aac").
+          Leave empty to build exactly what upstream specifies.
+        default: ""
+      publish_release:
+        description: Create a draft GitHub Release with the installers
+        type: boolean
+        default: false
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.xstudio_ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  XSTUDIO_REPO: https://github.com/AcademySoftwareFoundation/xstudio.git
+  # On a tag push there are no inputs, so the tag name is the upstream ref.
+  XSTUDIO_REF: ${{ inputs.xstudio_ref || github.ref_name }}
+  FFMPEG_EXTRA_FEATURES: ${{ inputs.ffmpeg_extra_features || '' }}
+  QT_VERSION: "6.5.3"
+  VCPKG_DISABLE_METRICS: "1"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  windows:
+    if: github.event_name == 'push' || inputs.build_windows
+    # Pinned rather than windows-latest: xSTUDIO's guide targets VS 2022 and
+    # Qt 6.5.3 msvc2019_64, and an image change invalidates the vcpkg cache.
+    runs-on: windows-2022
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      # Short root: vcpkg buildtrees hit Windows path-length limits otherwise.
+      # vcpkg must sit next to xstudio (CMakePresets uses ../vcpkg).
+      ROOT: C:\x
+      VCPKG_BINARY_SOURCES: clear;files,C:\x\vcpkg-cache,readwrite
+    steps:
+      - name: Check out build scripts
+        uses: actions/checkout@v4
+        with:
+          path: release
+
+      - name: Enable long paths for git
+        run: git config --system core.longpaths true
+
+      - name: Fetch xSTUDIO source
+        run: |
+          New-Item -ItemType Directory -Force "$env:ROOT\vcpkg-cache" | Out-Null
+          git clone --filter=blob:none $env:XSTUDIO_REPO "$env:ROOT\xstudio"
+          git -C "$env:ROOT\xstudio" checkout $env:XSTUDIO_REF
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          python "$env:GITHUB_WORKSPACE\release\scripts\patch_ffmpeg_features.py" `
+            "$env:ROOT\xstudio\vcpkg.json" "$env:FFMPEG_EXTRA_FEATURES"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $sha  = git -C "$env:ROOT\xstudio" rev-parse --short HEAD
+          $base = (Get-Content "$env:ROOT\xstudio\vcpkg.json" -Raw | ConvertFrom-Json).'builtin-baseline'
+          $hash = (Get-FileHash "$env:ROOT\xstudio\vcpkg.json").Hash.Substring(0,16)
+          "XSTUDIO_SHA=$sha"     >> $env:GITHUB_ENV
+          "VCPKG_COMMIT=$base"   >> $env:GITHUB_ENV
+          "MANIFEST_HASH=$hash"  >> $env:GITHUB_ENV
+          Write-Host "xSTUDIO $env:XSTUDIO_REF ($sha), vcpkg baseline $base"
+
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Ninja and NSIS if missing
+        run: |
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) { choco install ninja -y --no-progress }
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) {
+            if (-not (Test-Path "${env:ProgramFiles(x86)}\NSIS\makensis.exe")) { choco install nsis -y --no-progress }
+            "${env:ProgramFiles(x86)}\NSIS" >> $env:GITHUB_PATH
+          }
+
+      - name: Install Qt ${{ env.QT_VERSION }}
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: win64_msvc2019_64
+          modules: qtimageformats
+          dir: C:\x
+          cache: true
+
+      - name: Bootstrap vcpkg at xSTUDIO's baseline
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$env:ROOT\vcpkg"
+          git -C "$env:ROOT\vcpkg" checkout $env:VCPKG_COMMIT
+          & "$env:ROOT\vcpkg\bootstrap-vcpkg.bat" -disableMetrics
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Restore vcpkg binary cache
+        uses: actions/cache/restore@v4
+        with:
+          path: C:\x\vcpkg-cache
+          key: vcpkg-win-${{ env.VCPKG_COMMIT }}-${{ env.MANIFEST_HASH }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            vcpkg-win-${{ env.VCPKG_COMMIT }}-${{ env.MANIFEST_HASH }}-
+            vcpkg-win-${{ env.VCPKG_COMMIT }}-
+            vcpkg-win-
+
+      - name: Count cached packages
+        run: |
+          $n = (Get-ChildItem -Recurse -File "$env:ROOT\vcpkg-cache" -ErrorAction SilentlyContinue | Measure-Object).Count
+          "CACHE_FILES_BEFORE=$n" >> $env:GITHUB_ENV
+
+      - name: Build dependencies with vcpkg (hours on a cold cache)
+        id: deps
+        timeout-minutes: 320
+        working-directory: C:\x\xstudio
+        run: |
+          & "$env:ROOT\vcpkg\vcpkg.exe" install `
+            --triplet x64-windows `
+            --x-install-root=build\vcpkg_installed `
+            --overlay-ports=cmake\vcpkg_overlay_ports `
+            --overlay-triplets=cmake\vcpkg_triplets `
+            --clean-after-build
+          exit $LASTEXITCODE
+
+      - name: Check for new packages
+        id: newpkgs
+        if: always() && env.VCPKG_COMMIT != ''
+        run: |
+          $n = (Get-ChildItem -Recurse -File "$env:ROOT\vcpkg-cache" -ErrorAction SilentlyContinue | Measure-Object).Count
+          Write-Host "Cached packages: $env:CACHE_FILES_BEFORE -> $n"
+          if ([int]$n -ne [int]$env:CACHE_FILES_BEFORE) { "changed=true" >> $env:GITHUB_OUTPUT } else { "changed=false" >> $env:GITHUB_OUTPUT }
+
+      # Runs even if the dependency step failed or timed out, so a re-run
+      # resumes. Skipped when nothing new was built, to save cache space.
+      - name: Save vcpkg binary cache
+        if: always() && steps.newpkgs.outputs.changed == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: C:\x\vcpkg-cache
+          key: vcpkg-win-${{ env.VCPKG_COMMIT }}-${{ env.MANIFEST_HASH }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Configure
+        working-directory: C:\x\xstudio
+        run: |
+          $qt = "$env:ROOT\Qt\$env:QT_VERSION\msvc2019_64"
+          cmake --preset WinNinjaRelease "-DQt6_DIR=$qt\lib\cmake\Qt6"
+          exit $LASTEXITCODE
+
+      - name: Build installer
+        working-directory: C:\x\xstudio
+        run: |
+          cmake --build build --target package
+          exit $LASTEXITCODE
+
+      - name: Collect installer
+        run: |
+          $exe = Get-ChildItem "$env:ROOT\xstudio\build" -Filter "xSTUDIO-*-win64.exe" | Select-Object -First 1
+          if (-not $exe) { Write-Error "Installer not found in build folder"; exit 1 }
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $safe = $env:XSTUDIO_REF -replace '[^A-Za-z0-9._-]', '_'
+          Copy-Item $exe.FullName "dist\xSTUDIO-$safe-windows-x64-setup.exe"
+          Get-ChildItem dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xstudio-windows-x64
+          path: dist/*
+          retention-days: 14
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  macos:
+    if: github.event_name == 'push' || inputs.build_macos
+    runs-on: macos-15   # Apple Silicon
+    timeout-minutes: 360
+    env:
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      HOMEBREW_NO_ENV_HINTS: "1"
+    steps:
+      - name: Check out build scripts
+        uses: actions/checkout@v4
+        with:
+          path: release
+
+      - name: Set paths
+        run: |
+          echo "ROOT=$HOME/x" >> "$GITHUB_ENV"
+          echo "VCPKG_BINARY_SOURCES=clear;files,$HOME/x/vcpkg-cache,readwrite" >> "$GITHUB_ENV"
+
+      - name: Fetch xSTUDIO source
+        run: |
+          set -euo pipefail
+          mkdir -p "$ROOT/vcpkg-cache"
+          git clone --filter=blob:none "$XSTUDIO_REPO" "$ROOT/xstudio"
+          git -C "$ROOT/xstudio" checkout "$XSTUDIO_REF"
+          python3 "$GITHUB_WORKSPACE/release/scripts/patch_ffmpeg_features.py" \
+            "$ROOT/xstudio/vcpkg.json" "$FFMPEG_EXTRA_FEATURES"
+          echo "XSTUDIO_SHA=$(git -C "$ROOT/xstudio" rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          echo "VCPKG_COMMIT=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["builtin-baseline"])' "$ROOT/xstudio/vcpkg.json")" >> "$GITHUB_ENV"
+          echo "MANIFEST_HASH=$(shasum -a 256 "$ROOT/xstudio/vcpkg.json" | cut -c1-16)" >> "$GITHUB_ENV"
+
+      - name: Install Homebrew build tools
+        run: brew install ninja pkg-config nasm autoconf autoconf-archive automake libtool
+
+      - name: Install Qt ${{ env.QT_VERSION }}
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: clang_64
+          modules: qtimageformats
+          dir: ${{ runner.temp }}
+          cache: true
+
+      - name: Bootstrap vcpkg at xSTUDIO's baseline
+        run: |
+          set -euo pipefail
+          git clone https://github.com/microsoft/vcpkg.git "$ROOT/vcpkg"
+          git -C "$ROOT/vcpkg" checkout "$VCPKG_COMMIT"
+          "$ROOT/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+
+      - name: Restore vcpkg binary cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/x/vcpkg-cache
+          key: vcpkg-mac-${{ env.VCPKG_COMMIT }}-${{ env.MANIFEST_HASH }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            vcpkg-mac-${{ env.VCPKG_COMMIT }}-${{ env.MANIFEST_HASH }}-
+            vcpkg-mac-${{ env.VCPKG_COMMIT }}-
+            vcpkg-mac-
+
+      - name: Count cached packages
+        run: echo "CACHE_FILES_BEFORE=$(find "$ROOT/vcpkg-cache" -type f | wc -l | tr -d ' ')" >> "$GITHUB_ENV"
+
+      - name: Build dependencies with vcpkg (hours on a cold cache)
+        id: deps
+        timeout-minutes: 320
+        working-directory: ${{ env.ROOT }}/xstudio
+        run: |
+          "$ROOT/vcpkg/vcpkg" install \
+            --triplet arm-osx \
+            --x-install-root=build/vcpkg_installed \
+            --overlay-ports=cmake/vcpkg_overlay_ports \
+            --overlay-triplets=cmake/vcpkg_triplets \
+            --clean-after-build
+
+      - name: Check for new packages
+        id: newpkgs
+        if: always() && env.VCPKG_COMMIT != ''
+        run: |
+          n=$(find "$ROOT/vcpkg-cache" -type f | wc -l | tr -d ' ')
+          echo "Cached packages: $CACHE_FILES_BEFORE -> $n"
+          if [ "$n" != "$CACHE_FILES_BEFORE" ]; then echo "changed=true" >> "$GITHUB_OUTPUT"; else echo "changed=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Save vcpkg binary cache
+        if: always() && steps.newpkgs.outputs.changed == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/x/vcpkg-cache
+          key: vcpkg-mac-${{ env.VCPKG_COMMIT }}-${{ env.MANIFEST_HASH }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Configure
+        working-directory: ${{ env.ROOT }}/xstudio
+        run: |
+          cmake --preset MacOSNinjaRelease \
+            "-DQt6_DIR=$RUNNER_TEMP/Qt/$QT_VERSION/macos/lib/cmake/Qt6"
+
+      - name: Build and assemble xSTUDIO.app
+        working-directory: ${{ env.ROOT }}/xstudio
+        run: cmake --build build --target install
+
+      - name: Sign ad hoc and package DMG
+        run: |
+          set -euo pipefail
+          APP="$ROOT/xstudio/build/xSTUDIO.app"
+          test -d "$APP" || { echo "xSTUDIO.app not found"; exit 1; }
+          # Ad hoc signature: no Developer ID, but arm64 binaries must carry
+          # a valid signature to launch at all.
+          codesign --force --deep --sign - "$APP"
+          SAFE_REF=$(echo "$XSTUDIO_REF" | sed 's/[^A-Za-z0-9._-]/_/g')
+          STAGE="$RUNNER_TEMP/dmg"
+          mkdir -p "$STAGE" dist
+          ditto "$APP" "$STAGE/xSTUDIO.app"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create -volname "xSTUDIO" -srcfolder "$STAGE" -ov -format UDZO \
+            "dist/xSTUDIO-${SAFE_REF}-macos-arm64.dmg"
+          ls -lh dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xstudio-macos-arm64
+          path: dist/*
+          retention-days: 14
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  release:
+    needs: [windows, macos]
+    if: >-
+      always() && !cancelled() &&
+      (github.event_name == 'push' || inputs.publish_release) &&
+      (needs.windows.result == 'success' || needs.macos.result == 'success')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download installers
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            SAFE_REF=$(echo "$XSTUDIO_REF" | sed 's/[^A-Za-z0-9._-]/_/g')
+            TAG="build-${SAFE_REF}-${GITHUB_RUN_NUMBER}"
+          fi
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --draft \
+            --title "xSTUDIO ${XSTUDIO_REF}" \
+            --notes "Unofficial build of upstream xSTUDIO \`${XSTUDIO_REF}\`. FFmpeg extra features: \`${FFMPEG_EXTRA_FEATURES:-none}\`. See README for licensing notes."
