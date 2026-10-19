@@ -362,20 +362,33 @@ jobs:
           APP="$ROOT/xstudio/build/xSTUDIO.app"
           test -d "$APP" || { echo "xSTUDIO.app not found"; exit 1; }
           # Ad hoc signature: no Developer ID, but every arm64 binary must
-          # carry a valid signature to load at all. Sign each Mach-O file
-          # individually: 'codesign --deep' mistakes QML module folders with
-          # dotted names (e.g. qml/SessionSnapshots.1) for bundles and fails.
+          # carry a valid signature to load at all.
+          #
+          # xSTUDIO puts its QML modules (qmldir, .qml, dotted folder names)
+          # under Contents/PlugIns, which codesign expects to hold only code.
+          # So any signing that codesign treats as bundle signing fails: that
+          # includes --deep, and signing Contents/MacOS/xstudio.bin in place,
+          # because it is the bundle's main executable. Instead each Mach-O
+          # file is copied out, signed as a standalone file, and written back.
+          # The kernel only checks each binary's own signature, so this is
+          # enough for the app to run.
+          TMP="$RUNNER_TEMP/sign"
+          mkdir -p "$TMP"
           n=0
+          bad=0
           while IFS= read -r -d '' f; do
-            if file -b "$f" | grep -q 'Mach-O'; then
-              codesign --force --sign - "$f"
-              n=$((n+1))
+            file -b "$f" | grep -q 'Mach-O' || continue
+            cp "$f" "$TMP/bin"
+            codesign --force --sign - "$TMP/bin"
+            cat "$TMP/bin" > "$f"
+            if ! codesign --verify "$TMP/bin" 2>/dev/null; then
+              echo "::error::Signature not valid: $f"
+              bad=$((bad+1))
             fi
-          done < <(find "$APP" -type f -print0)
+            n=$((n+1))
+          done < <(find "$APP" -type f -print0 || true)
           echo "Ad hoc signed $n Mach-O files"
-          # Sealing the bundle as a whole is nice to have, not required to run.
-          codesign --force --sign - "$APP" \
-            || echo "::warning::Could not seal the app bundle; its binaries are still individually signed."
+          [ "$bad" -eq 0 ] || exit 1
           SAFE_REF=$(echo "$XSTUDIO_REF" | sed 's/[^A-Za-z0-9._-]/_/g')
           STAGE="$RUNNER_TEMP/dmg"
           mkdir -p "$STAGE" dist
