@@ -356,6 +356,29 @@ jobs:
         working-directory: ${{ env.ROOT }}/xstudio
         run: cmake --build build --target install
 
+      # xSTUDIO's install step is supposed to run macdeployqt, but in CI it
+      # silently does nothing: no Qt frameworks, no Qt plugins (so no
+      # 'cocoa' platform plugin, and the app aborts at startup), no qt.conf,
+      # no Qt QML modules. Run it explicitly here and check what it produced.
+      - name: Deploy Qt into the app (macdeployqt)
+        run: |
+          set -euo pipefail
+          APP="$ROOT/xstudio/build/xSTUDIO.app"
+          QTDIR="$RUNNER_TEMP/Qt/$QT_VERSION/macos"
+          echo "Before: $(ls "$APP/Contents/PlugIns" 2>/dev/null | tr '\n' ' ')"
+          echo "Before: Resources = $(ls "$APP/Contents/Resources" 2>/dev/null | tr '\n' ' ')"
+          "$QTDIR/bin/macdeployqt" "$APP" \
+            -qmldir="$ROOT/xstudio/ui" \
+            -qmldir="$ROOT/xstudio/src" \
+            -libpath="$ROOT/xstudio/build/vcpkg_installed/arm-osx/lib" \
+            -verbose=1
+          echo "After:  $(ls "$APP/Contents/PlugIns" | tr '\n' ' ')"
+          test -f "$APP/Contents/PlugIns/platforms/libqcocoa.dylib" \
+            || { echo "::error::macdeployqt did not deploy the cocoa platform plugin"; exit 1; }
+          test -f "$APP/Contents/Resources/qt.conf" \
+            || { echo "::error::macdeployqt did not write Contents/Resources/qt.conf"; exit 1; }
+          cat "$APP/Contents/Resources/qt.conf"
+
       # macdeployqt deploys Qt but misses vcpkg libraries linked via @rpath
       # (e.g. libspdlog), which then only resolve on the build machine.
       # Copy anything missing into Contents/Frameworks, and fail the build
