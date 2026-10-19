@@ -372,6 +372,11 @@ jobs:
             -qmldir="$ROOT/xstudio/src" \
             -libpath="$ROOT/xstudio/build/vcpkg_installed/arm-osx/lib" \
             -verbose=1
+          # Qt's ODBC and PostgreSQL SQL drivers link to libiodbc/libpq at
+          # paths on Qt's own build machine, which exist nowhere else.
+          # xSTUDIO doesn't use them, so drop them rather than ship broken plugins.
+          rm -f "$APP/Contents/PlugIns/sqldrivers/libqsqlodbc.dylib" \
+                "$APP/Contents/PlugIns/sqldrivers/libqsqlpsql.dylib"
           echo "After:  $(ls "$APP/Contents/PlugIns" | tr '\n' ' ')"
           test -f "$APP/Contents/PlugIns/platforms/libqcocoa.dylib" \
             || { echo "::error::macdeployqt did not deploy the cocoa platform plugin"; exit 1; }

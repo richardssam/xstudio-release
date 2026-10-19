@@ -182,7 +182,12 @@ def main() -> int:
         print(f"  {rel}")
     for p in problems:
         print(f"::error::{p}")
-    return 1 if problems else 0
+    if problems:
+        print(f"FAILED: {len(problems)} dependencies cannot be satisfied inside the app "
+              "(listed above). The app would crash or lose features on other Macs.")
+        return 1
+    print("OK: every dependency resolves inside the app bundle.")
+    return 0
 
 
 if __name__ == "__main__":
