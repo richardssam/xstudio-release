@@ -356,6 +356,17 @@ jobs:
         working-directory: ${{ env.ROOT }}/xstudio
         run: cmake --build build --target install
 
+      # macdeployqt deploys Qt but misses vcpkg libraries linked via @rpath
+      # (e.g. libspdlog), which then only resolve on the build machine.
+      # Copy anything missing into Contents/Frameworks, and fail the build
+      # if any dependency still points outside the bundle.
+      - name: Bundle missing libraries
+        run: |
+          python3 "$GITHUB_WORKSPACE/release/scripts/macos_bundle_deps.py" \
+            "$ROOT/xstudio/build/xSTUDIO.app" \
+            "$ROOT/xstudio/build/vcpkg_installed/arm-osx/lib" \
+            "$RUNNER_TEMP/Qt/$QT_VERSION/macos/lib"
+
       - name: Sign ad hoc and package DMG
         run: |
           set -euo pipefail
