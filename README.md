@@ -6,20 +6,20 @@ This repo is not a fork. It holds only build automation. xSTUDIO's source is clo
 
 | Platform | Runner | Output |
 |---|---|---|
-| Windows x64 | `windows-2022` | `xSTUDIO-<ref>-windows-x64-setup.exe` (NSIS installer) |
+| Windows x64 | `windows-2022` | `xSTUDIO-<ref>-windows-x64-setup.exe` (NSIS installer) and `xSTUDIO-<ref>-windows-x64-portable.zip` (no install needed; 1.4.0+) |
 | macOS arm64 | `macos-15` | `xSTUDIO-<ref>-macos-arm64.dmg` (ad hoc signed) |
 
 ## Running a build
 
-**Manually:** go to Actions → **Build xSTUDIO** → **Run workflow**. Pick the upstream ref (default `v1.3.0`) and which platforms to build. The installers appear as artifacts on the run and are kept for 14 days.
+**Manually:** go to Actions → **Build xSTUDIO** → **Run workflow**. Pick the upstream ref (default `v1.4.0`) and which platforms to build. The installers appear as artifacts on the run and are kept for 14 days.
 
 **From a tag:** push a tag named after the upstream release:
 
 ```
-git tag v1.3.0 && git push origin v1.3.0
+git tag v1.4.0 && git push origin v1.4.0
 ```
 
-That builds upstream `v1.3.0` on both platforms and creates a **draft** GitHub Release with both installers attached. Nothing becomes public until you publish the draft.
+That builds upstream `v1.4.0` on both platforms and creates a **draft** GitHub Release with both installers attached. Nothing becomes public until you publish the draft.
 
 ## The first run is slow
 

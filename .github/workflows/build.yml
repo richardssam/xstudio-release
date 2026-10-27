@@ -19,7 +19,7 @@ on:
     inputs:
       xstudio_ref:
         description: Upstream xSTUDIO tag, branch or commit
-        default: v1.3.0
+        default: v1.4.0
       build_windows:
         description: Build Windows (x64 NSIS installer)
         type: boolean
@@ -35,6 +35,10 @@ on:
         default: ""
       release_only_deps:
         description: Build vcpkg dependencies in Release only (skips debug builds, roughly halves dependency time)
+        type: boolean
+        default: true
+      windows_portable:
+        description: Also build the Windows portable zip (no installer; xSTUDIO 1.4.0+)
         type: boolean
         default: true
       publish_release:
@@ -225,6 +229,19 @@ jobs:
           cmake --build build --target package
           exit $LASTEXITCODE
 
+      # xSTUDIO 1.4.0 added a 'portable' target: a relocatable folder zipped up,
+      # no installer needed. Skipped on older refs that don't have it.
+      - name: Build portable zip
+        if: github.event_name == 'push' || inputs.windows_portable
+        working-directory: C:\x\xstudio
+        run: |
+          if (-not (Test-Path cmake\portable.cmake)) {
+            Write-Host "This xSTUDIO ref has no portable target; skipping."
+            exit 0
+          }
+          cmake --build build --target portable
+          exit $LASTEXITCODE
+
       - name: Collect installer
         run: |
           $exe = Get-ChildItem "$env:ROOT\xstudio\build" -Filter "xSTUDIO-*-win64.exe" | Select-Object -First 1
@@ -232,6 +249,8 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           $safe = $env:XSTUDIO_REF -replace '[^A-Za-z0-9._-]', '_'
           Copy-Item $exe.FullName "dist\xSTUDIO-$safe-windows-x64-setup.exe"
+          $zip = Get-ChildItem "$env:ROOT\xstudio\build" -Filter "xSTUDIO-*-win64-portable.zip" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($zip) { Copy-Item $zip.FullName "dist\xSTUDIO-$safe-windows-x64-portable.zip" }
           Get-ChildItem dist
 
       - name: Upload artifact
@@ -356,22 +375,26 @@ jobs:
         working-directory: ${{ env.ROOT }}/xstudio
         run: cmake --build build --target install
 
-      # xSTUDIO's install step is supposed to run macdeployqt, but in CI it
-      # silently does nothing: no Qt frameworks, no Qt plugins (so no
-      # 'cocoa' platform plugin, and the app aborts at startup), no qt.conf,
-      # no Qt QML modules. Run it explicitly here and check what it produced.
+      # xSTUDIO's install step runs macdeployqt. Up to 1.3.0 that silently did
+      # nothing (its install script used ${CMAKE_BINARY_DIR}, which is empty at
+      # install time), leaving no Qt plugins or qt.conf, so the app aborted at
+      # startup. 1.4.0 fixed this. So: run macdeployqt ourselves only if the
+      # install didn't, then check the result either way.
       - name: Deploy Qt into the app (macdeployqt)
         run: |
           set -euo pipefail
           APP="$ROOT/xstudio/build/xSTUDIO.app"
           QTDIR="$RUNNER_TEMP/Qt/$QT_VERSION/macos"
-          echo "Before: $(ls "$APP/Contents/PlugIns" 2>/dev/null | tr '\n' ' ')"
-          echo "Before: Resources = $(ls "$APP/Contents/Resources" 2>/dev/null | tr '\n' ' ')"
-          "$QTDIR/bin/macdeployqt" "$APP" \
-            -qmldir="$ROOT/xstudio/ui" \
-            -qmldir="$ROOT/xstudio/src" \
-            -libpath="$ROOT/xstudio/build/vcpkg_installed/arm-osx/lib" \
-            -verbose=1
+          if [ -f "$APP/Contents/PlugIns/platforms/libqcocoa.dylib" ] && [ -f "$APP/Contents/Resources/qt.conf" ]; then
+            echo "xSTUDIO's install already deployed Qt; not running macdeployqt again."
+          else
+            echo "Qt not deployed by xSTUDIO's install; running macdeployqt."
+            "$QTDIR/bin/macdeployqt" "$APP" \
+              -qmldir="$ROOT/xstudio/ui" \
+              -qmldir="$ROOT/xstudio/src" \
+              -libpath="$ROOT/xstudio/build/vcpkg_installed/arm-osx/lib" \
+              -verbose=1
+          fi
           # Qt's ODBC and PostgreSQL SQL drivers link to libiodbc/libpq at
           # paths on Qt's own build machine, which exist nowhere else.
           # xSTUDIO doesn't use them, so drop them rather than ship broken plugins.
