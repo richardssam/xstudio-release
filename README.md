@@ -61,13 +61,19 @@ If the cache is lost, the next build is simply cold again; nothing breaks.
 
 Read this before making builds public. This is not legal advice.
 
-**What the stock build already does.** Upstream `vcpkg.json` builds FFmpeg with the `x264` and `x265` features. In vcpkg these pull in the `gpl` feature, so **a stock xSTUDIO build already ships GPL-licensed FFmpeg libraries**. FFmpeg's built-in decoders are also included: ProRes, DNxHD/HR, H.264, HEVC and AAC. xSTUDIO itself doesn't restrict which codecs it uses.
+**What upstream builds.** Upstream `vcpkg.json` builds FFmpeg with the `x264` and `x265` encoders. In vcpkg these pull in the `gpl` feature, so a stock xSTUDIO build ships **GPL**-licensed FFmpeg. FFmpeg's built-in decoders are also included: ProRes, DNxHD/HR, H.264, HEVC and AAC.
+
+**What this repo builds by default: LGPL.** The `ffmpeg_remove_features` input (default `x264,x265`, also used for tag releases) removes those two encoders. They are the only features xSTUDIO enables that need `gpl`, so FFmpeg becomes **LGPL**. Decoding is unaffected: FFmpeg's own H.264/HEVC decoders don't use x264/x265. What changes is movie export: xSTUDIO's "H.264" export presets (and the Python API's default) used `libx264`, so `scripts/retarget_h264_export.py` switches them to the operating system's encoder, `h264_videotoolbox` on macOS and `h264_mf` (Media Foundation) on Windows, at a fixed bitrate (20 Mb/s, or 4 Mb/s for "LowQ"). Apple and Microsoft license those encoders. ProRes and DNxHD export are unchanged. Clear the input to build exactly as upstream does (GPL).
 
 **Patents are a separate question.** H.264, HEVC and AAC are covered by patent pools, and ProRes is Apple's. Building these codecs is fine; distributing binaries that contain them may need licences, depending on who receives them and where.
 
 **The `ffmpeg_extra_features` input** adds vcpkg FFmpeg features on top of upstream, e.g. `nonfree,fdk-aac`. **`nonfree` makes the FFmpeg binaries legally non-redistributable.** Builds with it should stay in a private repo and must not go into public releases. The workflow enforces this: in a public repo, a `licence-check` job fails the run if you ask for `nonfree`, `all-nonfree` or `fdk-aac`. To make such builds, use a private copy of this repo.
 
 **Visibility.** On a public repo, run artifacts and releases can be downloaded by anyone, which counts as distribution. A private repo keeps builds to you and your collaborators. Private repos use your Actions minutes, and macOS minutes are billed at a multiplier.
+
+## Testing upstream pull requests (macOS)
+
+The `macos_pull_requests` input (default `359`) merges upstream xSTUDIO pull requests into the checkout before the macOS build, so you can try changes before they land. #359 adds VideoToolbox decoding of H.264, HEVC and ProRes, which also means those formats are decoded by Apple's licensed decoder, with FFmpeg as the fallback (preference: Playback → "VideoToolbox Decoding (macOS)"). The PR's current head is fetched on every run and its commit is logged. A PR that doesn't merge cleanly fails the job. Tag-triggered releases never merge PRs, so a release is always upstream's code.
 
 ## macOS: opening an unsigned build
 

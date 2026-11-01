@@ -28,6 +28,17 @@ on:
         description: Build macOS (arm64 DMG)
         type: boolean
         default: true
+      ffmpeg_remove_features:
+        description: >-
+          vcpkg FFmpeg features to remove, comma separated. The default drops the
+          x264/x265 encoders, which makes FFmpeg LGPL instead of GPL; xSTUDIO's
+          H.264 export presets are switched to the OS encoder to match.
+        default: "x264,x265"
+      macos_pull_requests:
+        description: >-
+          macOS only: upstream xSTUDIO pull request numbers to merge before building,
+          comma separated (e.g. "359" for VideoToolbox decoding). Empty for none.
+        default: "359"
       ffmpeg_extra_features:
         description: >-
           Extra vcpkg FFmpeg features, comma separated (e.g. "nonfree,fdk-aac").
@@ -60,6 +71,10 @@ env:
   # On a tag push there are no inputs, so the tag name is the upstream ref.
   XSTUDIO_REF: ${{ inputs.xstudio_ref || github.ref_name }}
   FFMPEG_EXTRA_FEATURES: ${{ inputs.ffmpeg_extra_features || '' }}
+  # Tag pushes have no inputs: they drop x264/x265 and merge no PRs, so a
+  # release is upstream's code exactly, built as LGPL.
+  FFMPEG_REMOVE_FEATURES: ${{ github.event_name == 'push' && 'x264,x265' || inputs.ffmpeg_remove_features }}
+  MACOS_PULL_REQUESTS: ${{ github.event_name != 'push' && inputs.macos_pull_requests || '' }}
   QT_VERSION: "6.5.3"
   # Tag pushes have no inputs, so they take the default (release-only).
   RELEASE_ONLY_DEPS: ${{ github.event_name == 'push' || inputs.release_only_deps }}
@@ -116,8 +131,12 @@ jobs:
           git -C "$env:ROOT\xstudio" checkout $env:XSTUDIO_REF
           if ($LASTEXITCODE -ne 0) { exit 1 }
           python "$env:GITHUB_WORKSPACE\release\scripts\patch_ffmpeg_features.py" `
-            "$env:ROOT\xstudio\vcpkg.json" "$env:FFMPEG_EXTRA_FEATURES"
+            "$env:ROOT\xstudio\vcpkg.json" "$env:FFMPEG_EXTRA_FEATURES" "$env:FFMPEG_REMOVE_FEATURES"
           if ($LASTEXITCODE -ne 0) { exit 1 }
+          if (",$env:FFMPEG_REMOVE_FEATURES," -replace ' ','' -match ',x264,') {
+            python "$env:GITHUB_WORKSPACE\release\scripts\retarget_h264_export.py" "$env:ROOT\xstudio" windows
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
           python "$env:GITHUB_WORKSPACE\release\scripts\fix_upstream.py" "$env:ROOT\xstudio"
           if ($LASTEXITCODE -ne 0) { exit 1 }
           $sha  = git -C "$env:ROOT\xstudio" rev-parse --short HEAD
@@ -287,8 +306,20 @@ jobs:
           mkdir -p "$ROOT/vcpkg-cache"
           git clone --filter=blob:none "$XSTUDIO_REPO" "$ROOT/xstudio"
           git -C "$ROOT/xstudio" checkout "$XSTUDIO_REF"
+          # Merge any requested upstream PRs on top of the ref (macOS only for now).
+          for pr in $(echo "$MACOS_PULL_REQUESTS" | tr ',' ' '); do
+            echo "Merging upstream PR #$pr"
+            git -C "$ROOT/xstudio" fetch --filter=blob:none origin "pull/$pr/head"
+            echo "  PR #$pr head: $(git -C "$ROOT/xstudio" rev-parse --short FETCH_HEAD)"
+            git -C "$ROOT/xstudio" -c user.name=ci -c user.email=ci@localhost \
+              merge --no-ff --no-edit -m "Merge upstream PR #$pr" FETCH_HEAD \
+              || { echo "::error::PR #$pr does not merge cleanly onto $XSTUDIO_REF"; exit 1; }
+          done
           python3 "$GITHUB_WORKSPACE/release/scripts/patch_ffmpeg_features.py" \
-            "$ROOT/xstudio/vcpkg.json" "$FFMPEG_EXTRA_FEATURES"
+            "$ROOT/xstudio/vcpkg.json" "$FFMPEG_EXTRA_FEATURES" "$FFMPEG_REMOVE_FEATURES"
+          if echo ",$FFMPEG_REMOVE_FEATURES," | tr -d ' ' | grep -q ',x264,'; then
+            python3 "$GITHUB_WORKSPACE/release/scripts/retarget_h264_export.py" "$ROOT/xstudio" macos
+          fi
           python3 "$GITHUB_WORKSPACE/release/scripts/fix_upstream.py" "$ROOT/xstudio"
           echo "XSTUDIO_SHA=$(git -C "$ROOT/xstudio" rev-parse --short HEAD)" >> "$GITHUB_ENV"
           echo "VCPKG_COMMIT=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["builtin-baseline"])' "$ROOT/xstudio/vcpkg.json")" >> "$GITHUB_ENV"
@@ -501,4 +532,4 @@ jobs:
             --target "$GITHUB_SHA" \
             --draft \
             --title "xSTUDIO ${XSTUDIO_REF}" \
-            --notes "Unofficial build of upstream xSTUDIO \`${XSTUDIO_REF}\`. FFmpeg extra features: \`${FFMPEG_EXTRA_FEATURES:-none}\`. See README for licensing notes."
+            --notes "Unofficial build of upstream xSTUDIO \`${XSTUDIO_REF}\`. FFmpeg features removed: \`${FFMPEG_REMOVE_FEATURES:-none}\`; added: \`${FFMPEG_EXTRA_FEATURES:-none}\`. macOS upstream PRs merged: \`${MACOS_PULL_REQUESTS:-none}\`. See README for licensing notes."
